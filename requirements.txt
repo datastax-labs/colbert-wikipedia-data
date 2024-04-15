@@ -4,3 +4,4 @@ Flask==3.0.2
 langchain-text-splitters==0.0.1
 sentence-transformers==2.5.1
 torch==2.2.1
+faiss-gpu

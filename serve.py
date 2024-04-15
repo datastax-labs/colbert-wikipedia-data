@@ -57,7 +57,14 @@ def retrieve_colbert(query):
     scores = {}
     for qv in query_encodings:
         rows = db.session.execute(db.query_colbert_ann_stmt, [list(qv)])
-        for row in rows:
+
+    query_encodings_futures = []
+    for qv in query_encodings:
+        # per token based retrieval
+        query_encodings_futures.append(db.session.execute_async(db.query_colbert_ann_stmt, [list(qv)]))
+
+    for future in query_encodings_futures:
+        for row in future.result():
             title = row.title
             chunk_no = str(row.chunk_no)
             t = tuple([title, chunk_no])

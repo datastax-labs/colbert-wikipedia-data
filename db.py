@@ -30,25 +30,57 @@ class DB:
         self.session = self.cluster.connect()
         self.session.default_timeout = 60
 
+        #
+        # Queries
+        #
+
         query_minilm_cql = f"""
         SELECT title, chunk_no, body
         FROM {keyspace}.articles
-        ORDER BY all_minilm_l6_v2_embedding ANN OF ?
+        ORDER BY all_minilm_l6_v2 ANN OF ?
         LIMIT 5
         """
-        self.query_minilm_stmt = self.session.prepare(query_minilm_cql)
+        try:
+            self.query_minilm_stmt = self.session.prepare(query_minilm_cql)
+        except:
+            print("could not prepare ANN on all_minilm_l6_v2 (mising index ?)")
 
         query_colbert_ann_cql = f"""
-        SELECT title, chunk_no, bert_embedding
+        SELECT title, chunk_no, colbert
         FROM {keyspace}.articles
-        ORDER BY bert_embedding ANN OF ?
+        ORDER BY colbert ANN OF ?
         LIMIT 5
         """
-        self.query_colbert_ann_stmt = self.session.prepare(query_colbert_ann_cql)
+        try:
+            self.query_colbert_ann_stmt = self.session.prepare(query_colbert_ann_cql)
+        except:
+            print("could not prepare ANN on colbert (mising index ?)")
 
         query_part_by_pk = f"""
         SELECT body
         FROM {keyspace}.articles
-        WHERE wiki = 'simplewiki' and language = 'en' and title = ? AND chunk_no = ? AND bert_embedding_no = -1
+        WHERE wiki = 'simplewiki' and language = 'en' and title = ? AND chunk_no = ? AND colbert_no = -1
         """
         self.query_part_by_pk_stmt = self.session.prepare(query_part_by_pk)
+
+        #
+        # Inserts
+        #
+
+        insert_article_cql = f"""
+            INSERT INTO wikidata.articles (wiki, language, title, chunk_no, colbert_no, id, revision, body)
+            VALUES ('?', '?', '?', -1, -1, ?, ?, '?')
+            """
+        self.insert_article_stmt = self.session.prepare(insert_article_cql)
+
+        insert_chunk_cql = f"""
+                INSERT INTO wikidata.articles (wiki, language, title, chunk_no, colbert_no, id, revision, body, all_minilm_l6_v2, e5_mistral_7b_instruct)
+                VALUES ('?', '?', '?', ?, -1, ?, ?, '?', ?, ?)
+                """
+        self.insert_chunk_stmt = self.session.prepare(insert_chunk_cql)
+
+        insert_colbert_cql = f"""
+                    INSERT INTO wikidata.articles (wiki, language, title, chunk_no, colbert_no, id, revision, colbert)
+                    VALUES ('?', '?', '?', ?, ?, ?, ?, ?)
+                    """
+        self.insert_article_stmt = self.session.prepare(insert_colbert_cql)

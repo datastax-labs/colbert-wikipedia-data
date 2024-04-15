@@ -49,25 +49,23 @@ from sentence_transformers import SentenceTransformer
 
 thread_local_storage = threading.local()
 
+# e5-mistral-7b-instruct is very slow and resource intensive
+MISTRAL_ENABLED = True
+
 
 # langchain sentence chunking
-def _chunk_string(s, chunk_size, chunk_overlap):
+def _chunk_string(s):
     """Divide a string into chunks of `chunk_length` with overlaps of `chunk_overlap`."""
-    splitter = RecursiveCharacterTextSplitter(
-        # Set custom chunk size
-        chunk_size=chunk_size,
-        chunk_overlap=chunk_overlap,
-        # Use length of the text as the size measure
-        length_function=len,
-    )
+    splitter = RecursiveCharacterTextSplitter(chunk_size=1024, chunk_overlap=256)
     return [chunk.page_content for chunk in splitter.create_documents([s])]
 
 
 def create_transformers():
     _get_threadlocal_transformer_minilm()
     _get_threadlocal_encoder_colbert()
-    # e5-mistral-7b-instruct is too slow and resource intensive (for my m3 pro)
-    #_get_threadlocal_transformer_mistral()
+    if (MISTRAL_ENABLED):
+        _get_threadlocal_transformer_mistral()
+    print("transformers created")
 
 def _get_threadlocal_transformer_minilm():
     """ https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2 """
@@ -86,6 +84,7 @@ def _get_threadlocal_transformer_mistral():
         )
     return thread_local_storage.transformer_mistral
 
+
 def _get_threadlocal_encoder_colbert():
     """ """
     if getattr(thread_local_storage, "encoder_colbert", None) is None:
@@ -95,11 +94,11 @@ def _get_threadlocal_encoder_colbert():
     return thread_local_storage.encoder_colbert
 
 
-def process_dump(input, chunk_size, chunk_overlap):
+def process_dump(input):
     # download transformers first in the main thread. prevents parallel downloads wastage
     create_transformers()
 
-    num_threads = 16
+    num_threads = 1
     counter = itertools.count()
     with ThreadPoolExecutor(max_workers=num_threads) as executor:
         while True:
@@ -110,10 +109,10 @@ def process_dump(input, chunk_size, chunk_overlap):
             if not line: break
             index = json.loads(line)
             content = json.loads(input.readline())
-            executor.submit(_process_article, index, content, counter, chunk_size, chunk_overlap)
+            executor.submit(_process_article, index, content, counter)
 
 
-def _process_article(index, content, counter, chunk_size, chunk_overlap):
+def _process_article(index, content, counter):
     type = index["index"]["_type"]
     if type == "_doc" and content["namespace"] == 0:
         id = int(index["index"]["_id"])
@@ -124,27 +123,38 @@ def _process_article(index, content, counter, chunk_size, chunk_overlap):
         body = re.sub(r"  \^ .*", "", content["text"]).replace("'", "")
         c = f"{title}\n\n{body}"
         
-        db.session.execute(f"""
-            INSERT INTO wikidata.articles (wiki, language, title, chunk_no, bert_embedding_no, id, revision, body)
-            VALUES ('{wiki}', '{language}', '{title}', -1, -1, {id}, {revision}, '{c}')
-            """)
+        #db.session.execute(f"""
+        #    INSERT INTO wikidata.articles (wiki, language, title, chunk_no, colbert_no, id, revision, body)
+        #    VALUES ('{wiki}', '{language}', '{title}', -1, -1, {id}, {revision}, '{c}')
+        #    """)
 
         # chunk
-        chunks = _chunk_string(body, chunk_size, chunk_overlap)
+        chunks = _chunk_string(body)
         # create embeddings
         minilm_embeddings = _get_threadlocal_transformer_minilm().encode(chunks, show_progress_bar=False)
-        #mistral_embeddings = _get_threadlocal_transformer_mistral().encode(chunks) # too expensive and slow
+        mistral_embeddings = _get_threadlocal_transformer_mistral().encode(chunks, show_progress_bar=False) if MISTRAL_ENABLED else [0]
 
+        print(f"chunks {len(chunks)} minilm {len(minilm_embeddings)} mistral {len(mistral_embeddings)}")
         # write each chunk to separate file
         for chunk_no, chunk in enumerate(chunks):
-            e = minilm_embeddings[chunk_no].tolist()
+            minilm_e = minilm_embeddings[chunk_no].tolist()
+            mistral_e = mistral_embeddings[chunk_no].tolist() if MISTRAL_ENABLED else None
             c = f"{title}\n\n{chunk}"
 
-            db.session.execute(
-                f"""
-                INSERT INTO wikidata.articles (wiki, language, title, chunk_no, bert_embedding_no, id, revision, body, all_minilm_l6_v2_embedding)
-                VALUES ('{wiki}', '{language}', '{title}', {chunk_no}, -1, {id}, {revision}, '{c}', {e})
-                """)
+            if MISTRAL_ENABLED:
+                #db.session.execute(
+                print(
+                    f"""
+                    INSERT INTO wikidata.articles (wiki, language, title, chunk_no, colbert_no, id, revision, body, all_minilm_l6_v2, e5_mistral_7b_instruct)
+                    VALUES ('{wiki}', '{language}', '{title}', {chunk_no}, -1, {id}, {revision}, '{c}', {minilm_e}, {mistral_e})
+                    """)
+            else:
+                #db.session.execute(
+                print(
+                    f"""
+                    INSERT INTO wikidata.articles (wiki, language, title, chunk_no, colbert_no, id, revision, body, all_minilm_l6_v2)
+                    VALUES ('{wiki}', '{language}', '{title}', {chunk_no}, -1, {id}, {revision}, '{c}', {minilm_e})
+                    """)
 
         # colbert. this is noisy, xxx how to quiet it ?
         encoder_colbert = _get_threadlocal_encoder_colbert()
@@ -158,11 +168,11 @@ def _process_article(index, content, counter, chunk_size, chunk_overlap):
                 e = e.tolist()
                 # chunk text is not stored under the colbert embeddings, to save on storage
                 #  use `bert_embedding_no = -1` to get chunk text
-                db.session.execute(
-                    f"""
-                    INSERT INTO wikidata.articles (wiki, language, title, chunk_no, bert_embedding_no, id, revision, bert_embedding)
-                    VALUES ('{wiki}', '{language}', '{title}', {chunk_no}, {bert_embedding_no}, {id}, {revision}, {e} )
-                    """)
+                #db.session.execute(
+                #    f"""
+                #    INSERT INTO wikidata.articles (wiki, language, title, chunk_no, colbert_no, id, revision, colbert)
+                #    VALUES ('{wiki}', '{language}', '{title}', {chunk_no}, {bert_embedding_no}, {id}, {revision}, {e} )
+                #    """)
 
     processed = next(counter)
     if processed % 1000 == 0:
@@ -177,17 +187,6 @@ def main():
 
     parser.add_argument(
         "input", help="Cirrus json wiki dump file (or '-' for reading from stdin)"
-    )
-    groupC = parser.add_argument_group("Chunking")
-    groupC.add_argument(
-        "--chunk_size",
-        default="1024",
-        help="chunk size in characters (default %(default)s)",
-    )
-    groupC.add_argument(
-        "--chunk_overlap",
-        default="256",
-        help="chunk overlap in characters (default %(default)s)",
     )
     groupS = parser.add_argument_group("Special")
     groupS.add_argument(
@@ -209,7 +208,7 @@ def main():
     else:
         input = open(input_file)
 
-    process_dump(input, args.chunk_size, args.chunk_overlap)
+    process_dump(input)
 
 
 db = DB(protocol_version=5)
